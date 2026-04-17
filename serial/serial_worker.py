@@ -20,11 +20,9 @@ class SerialWorker(QObject):
         self.baud_rate = 115200
         self.running = False
 
-        # 停止标志（用于中断固件发送）
         self.stop_requested = False
         self.stop_mutex = QMutex()
 
-        # 事件循环控制（用于立即中断等待）
         self.current_loop = None
         self.loop_mutex = QMutex()
 
@@ -53,7 +51,13 @@ class SerialWorker(QObject):
 
     @pyqtSlot()
     def start(self):
-        if self.serial is None:
+        """打开串口，带重试机制"""
+        # 清理旧对象
+        if self.serial:
+            self._cleanup_serial()
+
+        # 尝试打开，最多重试 3 次
+        for attempt in range(1, 4):
             self.serial = QSerialPort()
             self.serial.setPortName(self.port_name)
             self.serial.setBaudRate(self.baud_rate)
@@ -62,36 +66,54 @@ class SerialWorker(QObject):
             self.serial.setStopBits(QSerialPort.OneStop)
             self.serial.setFlowControl(QSerialPort.NoFlowControl)
 
-            if not self.serial.open(QSerialPort.ReadWrite):
-                self.log_signal.emit(f"Failed to open {self.port_name}")
-                self.finished_signal.emit(False, f"串口打开失败: {self.port_name}")
+            if self.serial.open(QSerialPort.ReadWrite):
+                self.serial.readyRead.connect(self._on_ready_read)
+                self.running = True
+                self.log_signal.emit(f"串口已打开: {self.port_name} @ {self.baud_rate}")
                 return
+            else:
+                error = self.serial.errorString()
+                self.log_signal.emit(f"打开尝试 {attempt}/3 失败: {error}")
+                self.serial.deleteLater()
+                self.serial = None
+                if attempt < 3:
+                    time.sleep(0.5)  # 等待 500ms 后重试
 
-            self.serial.readyRead.connect(self._on_ready_read)
-            self.running = True
-            self.log_signal.emit(f"串口已打开: {self.port_name} @ {self.baud_rate}")
+        self.finished_signal.emit(False, f"串口打开失败: {self.port_name}")
+        self.log_signal.emit(f"最终打开失败: {self.port_name}")
+
+    def _cleanup_serial(self):
+        """彻底清理串口对象"""
+        if self.serial:
+            try:
+                self.serial.disconnect()
+                if self.serial.isOpen():
+                    if self.serial.bytesToWrite() > 0:
+                        self.serial.waitForBytesWritten(300)
+                    self.serial.clear()
+                    self.serial.close()
+            except:
+                pass
+            self.serial.deleteLater()
+            self.serial = None
+        time.sleep(0.1)  # 给系统时间释放端口
 
     @pyqtSlot()
     def stop(self):
         self.running = False
-        if self.serial and self.serial.isOpen():
-            self.serial.close()
+        self.request_stop()
+        self._cleanup_serial()
         self.log_signal.emit("串口已关闭")
 
     @pyqtSlot()
     def request_stop(self):
-        """请求停止固件发送（线程安全，可立即中断等待）"""
         self.stop_mutex.lock()
         self.stop_requested = True
         self.stop_mutex.unlock()
-
-        # 立即中断当前正在等待的事件循环
         self.loop_mutex.lock()
         if self.current_loop:
             self.current_loop.quit()
         self.loop_mutex.unlock()
-
-        self.log_signal.emit("收到停止请求，正在中止固件发送...")
 
     def _is_stop_requested(self) -> bool:
         self.stop_mutex.lock()
@@ -135,13 +157,16 @@ class SerialWorker(QObject):
             discarded = self.serial.bytesAvailable()
             self.serial.readAll()
             if discarded > 0:
-                self.log_signal.emit(f"清空了 {discarded} 字节的残留数据")
+                self.log_signal.emit(f"清空了 {discarded} 字节残留数据")
 
     def send_frame_and_wait_ack(self, frame: bytes, expected_id: int, timeout_ms: int = None) -> bool:
         if timeout_ms is None:
             timeout_ms = self.ack_timeout_ms
 
-        # 检查停止标志
+        if not self.serial or not self.serial.isOpen():
+            self.log_signal.emit("串口未打开，无法发送")
+            return False
+
         if self._is_stop_requested():
             return False
 
@@ -164,7 +189,6 @@ class SerialWorker(QObject):
         self.serial.flush()
         self.log_signal.emit(f"发送帧, ID={expected_id}, len={len(frame)}")
 
-        # 创建事件循环并保存引用，以便停止时能立即退出
         loop = QEventLoop()
         self.loop_mutex.lock()
         self.current_loop = loop
@@ -175,21 +199,18 @@ class SerialWorker(QObject):
         timer.timeout.connect(loop.quit)
         timer.start(timeout_ms)
 
-        # 轮询检查停止标志和ACK（每10ms）
         check_timer = QTimer()
         check_timer.timeout.connect(lambda: loop.quit() if (self.ack_received or self._is_stop_requested()) else None)
         check_timer.start(10)
 
-        loop.exec_()   # 阻塞直到超时、收到ACK或停止请求
+        loop.exec_()
 
-        # 清理
         check_timer.stop()
         timer.stop()
         self.loop_mutex.lock()
         self.current_loop = None
         self.loop_mutex.unlock()
 
-        # 如果是因为停止请求退出，返回 False
         if self._is_stop_requested():
             self.log_signal.emit("等待ACK因停止请求而中断")
             return False
@@ -208,9 +229,13 @@ class SerialWorker(QObject):
 
     @pyqtSlot(bytes, int)
     def send_firmware(self, firmware_data: bytes, chunk_data_size: int = 251):
-        """发送固件，支持停止请求，且每次从头开始"""
-        # 清除之前的停止标志，确保从头开始
         self._clear_stop_request()
+
+        if not self.serial or not self.serial.isOpen():
+            self.log_signal.emit("串口未打开，无法发送固件")
+            self.finished_signal.emit(False, "串口未打开")
+            self.firmware_send_finished.emit(False)
+            return
 
         if chunk_data_size > 251:
             chunk_data_size = 251
@@ -221,7 +246,6 @@ class SerialWorker(QObject):
         self.log_signal.emit(f"重传配置: 超时={self.ack_timeout_ms}ms, 最大重试={self.max_retries}")
 
         for i in range(num_chunks):
-            # 每次循环前检查停止标志
             if self._is_stop_requested():
                 self.log_signal.emit("用户停止了升级")
                 self.finished_signal.emit(False, "升级已停止")
@@ -235,7 +259,6 @@ class SerialWorker(QObject):
 
             success = False
             for retry in range(self.max_retries):
-                # 重试前检查停止标志
                 if self._is_stop_requested():
                     self.log_signal.emit("用户停止了升级")
                     self.finished_signal.emit(False, "升级已停止")
@@ -246,8 +269,6 @@ class SerialWorker(QObject):
                 if self.send_frame_and_wait_ack(frame, packet_id):
                     success = True
                     break
-                # 超时后立即重试（不额外延时，因为已经等待了超时时间）
-                # 但为避免连续发送过快，加一个极短延时
                 if retry < self.max_retries - 1:
                     time.sleep(0.001)
 
@@ -261,7 +282,6 @@ class SerialWorker(QObject):
 
             self.progress_signal.emit(i+1, num_chunks)
 
-        # 正常完成（未被停止）
         if not self._is_stop_requested():
             self.finished_signal.emit(True, f"固件发送完成，共 {num_chunks} 帧")
         else:

@@ -17,6 +17,7 @@ from PyQt5.QtSerialPort import QSerialPortInfo
 
 from serial.serial_worker import SerialWorkerThread
 from firmware.loader import load_firmware, FirmwareLoaderError
+from PyQt5.QtCore import Qt, QMetaObject, Q_ARG, QSettings, QTimer
 
 
 def resource_path(relative_path):
@@ -202,21 +203,15 @@ class MainWindow(QMainWindow):
                 return
             baud = int(self.baud_combo.currentText())
 
-            # 创建工作线程
             self.serial_thread = SerialWorkerThread(self)
             self.worker = self.serial_thread.worker
             self.worker.configure(port, baud)
-
-            # 连接信号
             self.worker.log_signal.connect(self._log)
             self.worker.finished_signal.connect(self._on_upgrade_finished)
             self.worker.progress_signal.connect(self._update_progress)
-
-            # 启动线程
             self.serial_thread.start()
-
-            # 通过信号启动串口（跨线程安全）
-            self.worker.start_serial_signal.emit()
+            # 等待线程初始化完成再发送打开信号
+            QTimer.singleShot(50, lambda: self.worker.start_serial_signal.emit())
 
             self.open_btn.setText("关闭串口")
             self.start_btn.setEnabled(bool(self.firmware_data))
@@ -225,8 +220,17 @@ class MainWindow(QMainWindow):
             # 关闭串口
             if self.worker:
                 self.worker.stop_serial_signal.emit()
+            # 等待串口完全关闭
+            QTimer.singleShot(500, self._finalize_serial_close)
+    
+    def _finalize_serial_close(self):
+        """延迟关闭线程，确保端口释放"""
+        if self.serial_thread:
             self.serial_thread.quit()
-            self.serial_thread.wait()
+            if not self.serial_thread.wait(2000):
+                self.serial_thread.terminate()
+                self.serial_thread.wait()
+            self.serial_thread.deleteLater()
             self.serial_thread = None
             self.worker = None
             self.open_btn.setText("打开串口")
