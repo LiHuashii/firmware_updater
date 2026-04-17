@@ -187,7 +187,7 @@ class SerialWorker(QObject):
 
         self.serial.write(frame)
         self.serial.flush()
-        self.log_signal.emit(f"发送帧, ID={expected_id}, len={len(frame)}")
+        self.log_signal.emit(f"发送帧, tag={frame[1]}, len={len(frame)}")
 
         loop = QEventLoop()
         self.loop_mutex.lock()
@@ -220,11 +220,19 @@ class SerialWorker(QObject):
         ack_id = self.received_ack_id
         self.ack_mutex.unlock()
 
-        if received and ack_id == expected_id:
-            self.log_signal.emit(f"成功收到ACK (ID={expected_id})")
-            return True
+        if received:
+            # 如果 expected_id == -1，不校验 ID，只要收到 ACK 就算成功
+            if expected_id == -1:
+                self.log_signal.emit(f"成功收到ACK (不校验ID)")
+                return True
+            elif ack_id == expected_id:
+                self.log_signal.emit(f"成功收到匹配ACK (ID={expected_id})")
+                return True
+            else:
+                self.log_signal.emit(f"ID不匹配: 期望{expected_id}, 收到{ack_id}")
+                return False
         else:
-            self.log_signal.emit(f"等待ACK失败 (ID={expected_id})")
+            self.log_signal.emit(f"等待ACK超时 (ID={expected_id})")
             return False
 
     @pyqtSlot(bytes, int)
@@ -245,6 +253,7 @@ class SerialWorker(QObject):
         self.log_signal.emit(f"固件大小: {total_size} bytes, 分为 {num_chunks} 帧")
         self.log_signal.emit(f"重传配置: 超时={self.ack_timeout_ms}ms, 最大重试={self.max_retries}")
 
+        # 发送所有 DATA 帧
         for i in range(num_chunks):
             if self._is_stop_requested():
                 self.log_signal.emit("用户停止了升级")
@@ -282,10 +291,37 @@ class SerialWorker(QObject):
 
             self.progress_signal.emit(i+1, num_chunks)
 
-        if not self._is_stop_requested():
-            self.finished_signal.emit(True, f"固件发送完成，共 {num_chunks} 帧")
-        else:
-            self.finished_signal.emit(False, "升级已停止")
+        # 所有 DATA 帧发送完成，发送结束命令 CMD (0xFF)
+        self.log_signal.emit("所有数据帧发送完成，发送结束命令...")
+        cmd_value = b'\xff'  # 单字节，值为 0xFF
+        cmd_frame = FhStreamProtocol.pack(FhStreamProtocol.TAG_CMD, cmd_value)
+
+        # 等待 CMD 的 ACK（注意：CMD 帧的 ID 通常为特殊值，例如 0xFFFFFFFF，或者不要求 ID 匹配）
+        # 根据需求，我们等待 ACK 但不需要校验 ID（因为 CMD 帧没有 ID 概念）
+        # 修改等待逻辑：期望收到任意 ACK（或特定 ACK 内容）
+        cmd_ack_ok = False
+        for retry in range(self.max_retries):
+            if self._is_stop_requested():
+                self.log_signal.emit("用户停止了升级")
+                self.finished_signal.emit(False, "升级已停止")
+                self.firmware_send_finished.emit(False)
+                return
+
+            self.log_signal.emit(f"发送结束命令 (0xFF) 尝试 {retry+1}/{self.max_retries}")
+            # 发送 CMD 帧并等待 ACK
+            if self.send_frame_and_wait_ack(cmd_frame, expected_id=-1):  # 使用特殊 ID 表示不校验
+                cmd_ack_ok = True
+                break
+            if retry < self.max_retries - 1:
+                time.sleep(0.001)
+
+        if not cmd_ack_ok:
+            self.finished_signal.emit(False, "结束命令未收到 ACK")
+            self.firmware_send_finished.emit(False)
+            return
+
+        # 成功完成
+        self.finished_signal.emit(True, f"固件发送完成，共 {num_chunks} 帧，结束命令已确认")
         self.firmware_send_finished.emit(True)
 
 
