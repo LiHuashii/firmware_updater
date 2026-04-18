@@ -1,22 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-固件文件加载器，支持 .bin, .hex, .elf
+固件文件加载器，只支持 .bin 文件
 返回连续的二进制数据
 """
 
 import os
 from typing import Optional
-
-try:
-    from intelhex import IntelHex
-except ImportError:
-    IntelHex = None
-
-try:
-    from elftools.elf.elffile import ELFFile
-    from elftools.elf.segments import Segment
-except ImportError:
-    ELFFile = None
 
 
 class FirmwareLoaderError(Exception):
@@ -27,12 +16,13 @@ def load_firmware(file_path: str) -> bytes:
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".bin":
         return _load_bin(file_path)
-    elif ext == ".hex":
-        return _load_hex(file_path)
-    elif ext == ".elf":
-        return _load_elf(file_path)
     else:
-        raise FirmwareLoaderError(f"Unsupported file type: {ext}")
+        raise FirmwareLoaderError(f"Unsupported file type: {ext}. Only .bin files are supported.")
+
+
+def _load_bin(file_path: str) -> bytes:
+    with open(file_path, "rb") as f:
+        return f.read()
 
 
 def _load_bin(file_path: str) -> bytes:

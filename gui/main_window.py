@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         serial_layout.setSpacing(0)
         serial_layout.addWidget(QLabel("串口:"))
         self.port_combo = QComboBox()
+        self.port_combo.setMinimumWidth(60)
         serial_layout.addWidget(self.port_combo)
         self.refresh_btn = QPushButton("刷新")
         self.refresh_btn.clicked.connect(self._refresh_ports)
@@ -83,7 +84,7 @@ class MainWindow(QMainWindow):
         serial_layout.addSpacing(20)
         serial_layout.addWidget(QLabel("波特率:"))
         self.baud_combo = QComboBox()
-        self.baud_combo.addItems(["9600", "19200", "38400", "57600", "115200", "230400"])
+        self.baud_combo.addItems(["9600", "19200", "38400", "57600", "115200", "460800", "921600", "1000000"])
         # 恢复保存的波特率
         index = self.baud_combo.findText(self.saved_baud)
         if index >= 0:
@@ -108,6 +109,7 @@ class MainWindow(QMainWindow):
         self.retry_spin.setToolTip("每帧最大重试次数（1~20）")
         param_layout.addWidget(self.retry_spin)
 
+        param_layout.addSpacing(20)
         param_layout.addWidget(QLabel("超时时间(ms):"))
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(100, 10000)
@@ -239,7 +241,8 @@ class MainWindow(QMainWindow):
             self._log("串口已关闭")
 
     def _browse_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择固件", "", "固件 (*.bin *.hex *.elf);;所有文件 (*)")
+        # 修改文件过滤器，只显示.bin文件
+        path, _ = QFileDialog.getOpenFileName(self, "选择固件", "", "固件 (*.bin);;所有文件 (*)")
         if path:
             self.file_edit.setText(path)
             try:

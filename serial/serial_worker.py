@@ -36,7 +36,7 @@ class SerialWorker(QObject):
             "tag": None,
             "length": None,
             "value": bytearray(),
-            "crc": None
+            "crc": bytearray()
         }
 
         self.max_retries = 5
@@ -150,7 +150,7 @@ class SerialWorker(QObject):
                 else:
                     self.log_signal.emit(f"收到非ACK帧, tag=0x{tag:02X}")
             elif event == "ERROR_CRC":
-                self.log_signal.emit("CRC错误(接收帧)")
+                self.log_signal.emit("CRC校验错误(接收帧)")
 
     def _clear_read_buffer(self):
         if self.serial and self.serial.isOpen():
@@ -177,7 +177,7 @@ class SerialWorker(QObject):
             "tag": None,
             "length": None,
             "value": bytearray(),
-            "crc": None
+            "crc": bytearray()
         }
 
         self.ack_mutex.lock()
@@ -296,9 +296,7 @@ class SerialWorker(QObject):
         cmd_value = b'\xff'  # 单字节，值为 0xFF
         cmd_frame = FhStreamProtocol.pack(FhStreamProtocol.TAG_CMD, cmd_value)
 
-        # 等待 CMD 的 ACK（注意：CMD 帧的 ID 通常为特殊值，例如 0xFFFFFFFF，或者不要求 ID 匹配）
-        # 根据需求，我们等待 ACK 但不需要校验 ID（因为 CMD 帧没有 ID 概念）
-        # 修改等待逻辑：期望收到任意 ACK（或特定 ACK 内容）
+        # 等待 CMD 的 ACK
         cmd_ack_ok = False
         for retry in range(self.max_retries):
             if self._is_stop_requested():
@@ -308,8 +306,7 @@ class SerialWorker(QObject):
                 return
 
             self.log_signal.emit(f"发送结束命令 (0xFF) 尝试 {retry+1}/{self.max_retries}")
-            # 发送 CMD 帧并等待 ACK
-            if self.send_frame_and_wait_ack(cmd_frame, expected_id=-1):  # 使用特殊 ID 表示不校验
+            if self.send_frame_and_wait_ack(cmd_frame, expected_id=-1):
                 cmd_ack_ok = True
                 break
             if retry < self.max_retries - 1:

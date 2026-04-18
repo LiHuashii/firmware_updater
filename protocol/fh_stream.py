@@ -1,17 +1,28 @@
 # -*- coding: utf-8 -*-
 """
 FH_STREAM 协议封装
-帧格式: | HEAD(0x55) | TAG(1) | LEN(1) | VALUE(n) | CRC(1) |
-CRC固定为0xEE（不做实际校验）
+帧格式: | HEAD(0x55) | TAG(1) | LEN(1) | VALUE(n) | CRC(4) |
+CRC-32校验范围: TAG + LEN + VALUE
 """
+
+import struct
+import zlib
+
 
 class FhStreamProtocol:
     HEAD = 0x55
-    CRC_FIXED = 0xEE
 
     TAG_DATA = 0x00
     TAG_CMD  = 0x01
     TAG_ACK  = 0x02
+
+    # CRC 长度（字节）
+    CRC_LEN = 4
+
+    @staticmethod
+    def crc32_calc(data: bytes) -> int:
+        """计算CRC-32 (标准实现，与zlib.crc32一致)"""
+        return zlib.crc32(data) & 0xFFFFFFFF
 
     @staticmethod
     def pack(tag: int, value: bytes) -> bytes:
@@ -25,12 +36,23 @@ class FhStreamProtocol:
         if length > 255:
             raise ValueError(f"value length {length} exceeds 255")
 
+        # 计算CRC: 校验范围 = TAG + LEN + VALUE
+        crc_data = bytes([tag, length]) + value
+        print("=" * 50)
+        print(f"CRC调试:")
+        print(f"  数据(hex): {crc_data.hex()}")
+        # print(f"  CRC数据总长度: {len(crc_data)} 字节")
+        print("=" * 50)
+        print()  # 空行
+        crc = FhStreamProtocol.crc32_calc(crc_data)
+
         frame = bytearray()
         frame.append(FhStreamProtocol.HEAD)
         frame.append(tag)
         frame.append(length)
         frame.extend(value)
-        frame.append(FhStreamProtocol.CRC_FIXED)   # CRC固定为0xEE
+        # 使用大端序（网络字节序），与大多数嵌入式系统一致
+        frame.extend(struct.pack('>I', crc))  # 改为大端序 '>I'
         return bytes(frame)
 
     @staticmethod
@@ -43,7 +65,7 @@ class FhStreamProtocol:
             "tag": None,
             "length": None,
             "value": bytearray(),
-            "crc": None
+            "crc": bytearray()  # 收集CRC字节
         }
         返回 (event, frame_dict)
         event: None / "FRAME_RECEIVED" / "ERROR_CRC"
@@ -54,6 +76,11 @@ class FhStreamProtocol:
             if byte == FhStreamProtocol.HEAD:
                 state_machine["state"] = "TAG"
                 state_machine["head"] = byte
+                # 重置其他字段
+                state_machine["tag"] = None
+                state_machine["length"] = None
+                state_machine["value"] = bytearray()
+                state_machine["crc"] = bytearray()
             return None, None
 
         elif state == "TAG":
@@ -74,29 +101,47 @@ class FhStreamProtocol:
             return None, None
 
         elif state == "CRC":
-            state_machine["crc"] = byte
-            # CRC固定为0xEE，不实际校验，直接认为正确
-            if byte != FhStreamProtocol.CRC_FIXED:
-                # 虽然是固定值，但若下位机错误发送，仍然报错
-                event = "ERROR_CRC"
-            else:
-                event = "FRAME_RECEIVED"
-            # 复制帧数据
-            frame_copy = {
-                "head": state_machine["head"],
-                "tag": state_machine["tag"],
-                "length": state_machine["length"],
-                "value": bytes(state_machine["value"]),
-                "crc": state_machine["crc"]
-            }
-            # 重置状态机
-            state_machine["state"] = "IDLE"
-            state_machine["head"] = None
-            state_machine["tag"] = None
-            state_machine["length"] = None
-            state_machine["value"] = bytearray()
-            state_machine["crc"] = None
-            return event, frame_copy
+            state_machine["crc"].append(byte)
+            if len(state_machine["crc"]) >= FhStreamProtocol.CRC_LEN:
+                # CRC收集完成，进行校验
+                tag = state_machine["tag"]
+                length = state_machine["length"]
+                value = bytes(state_machine["value"])
+                received_crc_bytes = bytes(state_machine["crc"])
+                # 使用大端序解析
+                received_crc = struct.unpack('>I', received_crc_bytes)[0]
+
+                # 计算期望的CRC（校验范围：TAG + LEN + VALUE）
+                crc_data = bytes([tag, length]) + value
+                expected_crc = FhStreamProtocol.crc32_calc(crc_data)
+
+                # 打印调试信息
+                # print(f"CRC调试: 数据={crc_data.hex()}, 期望={hex(expected_crc)}, 收到={hex(received_crc)}")
+
+                if received_crc != expected_crc:
+                    event = "ERROR_CRC"
+                else:
+                    event = "FRAME_RECEIVED"
+
+                # 复制帧数据
+                frame_copy = {
+                    "head": state_machine["head"],
+                    "tag": tag,
+                    "length": length,
+                    "value": value,
+                    "crc": received_crc
+                }
+
+                # 重置状态机
+                state_machine["state"] = "IDLE"
+                state_machine["head"] = None
+                state_machine["tag"] = None
+                state_machine["length"] = None
+                state_machine["value"] = bytearray()
+                state_machine["crc"] = bytearray()
+
+                return event, frame_copy
+            return None, None
 
         else:
             # 未知状态，重置
@@ -113,13 +158,14 @@ class FhStreamProtocol:
         """
         if len(data_chunk) > 251:
             raise ValueError(f"data_chunk too large: {len(data_chunk)} > 251")
+        # packet_id使用小端序（与原来保持一致）
         value = packet_id.to_bytes(4, 'little') + data_chunk
         return FhStreamProtocol.pack(FhStreamProtocol.TAG_DATA, value)
 
     @staticmethod
     def extract_ack_id(ack_frame_value: bytes) -> int:
         """
-        从ACK帧的VALUE中提取ID（前4字节）
+        从ACK帧的VALUE中提取ID（前4字节，小端序）
         """
         if len(ack_frame_value) < 4:
             raise ValueError("ACK frame value too short")
