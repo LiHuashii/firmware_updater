@@ -32,7 +32,7 @@ def resource_path(relative_path):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FH_STREAM 固件升级工具")
+        self.setWindowTitle("FH_STREAM 固件升级工具 V1.0")
         self.setMinimumSize(1000, 700)
 
         # 设置窗口图标

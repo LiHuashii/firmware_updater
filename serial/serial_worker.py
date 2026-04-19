@@ -304,10 +304,21 @@ class SerialWorker(QObject):
 
             self.progress_signal.emit(i+1, num_chunks)
 
-        # 所有 DATA 帧发送完成，发送结束命令 CMD (0xFF)
-        self.log_signal.emit("所有数据帧发送完成，发送结束命令...")
-        cmd_value = b'\xff'  # 单字节，值为 0xFF
+        # 所有 DATA 帧发送完成，发送结束命令 CMD，VALUE为整个固件的CRC-32
+        self.log_signal.emit("所有数据帧发送完成，发送结束命令（固件CRC-32）...")
+        
+        # 计算整个固件文件的CRC-32
+        # 校验范围: LEN(固定0x04) + bin文件内容
+        # 注意：LEN 固定为 0x04 表示后面跟4字节的CRC值，但这里我们需要计算的是固件内容的CRC
+        # 按照要求: 计算的数据为 LEN（固定为0x04）+ bin文件内容
+        crc_data = bytes([0x04]) + firmware_data
+        firmware_crc = FhStreamProtocol.crc32_calc(crc_data)
+        
+        # VALUE 为 4 字节的 CRC-32 值（小端序）
+        cmd_value = firmware_crc.to_bytes(4, 'little')
         cmd_frame = FhStreamProtocol.pack(FhStreamProtocol.TAG_CMD, cmd_value)
+        
+        self.log_signal.emit(f"固件CRC-32: 0x{firmware_crc:08X}")
 
         # 等待 CMD 的 ACK
         cmd_ack_ok = False
@@ -318,7 +329,7 @@ class SerialWorker(QObject):
                 self.firmware_send_finished.emit(False)
                 return
 
-            self.log_signal.emit(f"发送结束命令 (0xFF) 尝试 {retry+1}/{self.max_retries}")
+            self.log_signal.emit(f"发送结束命令 (CRC=0x{firmware_crc:08X}) 尝试 {retry+1}/{self.max_retries}")
             if self.send_frame_and_wait_ack(cmd_frame, expected_id=-1):
                 cmd_ack_ok = True
                 break
@@ -331,7 +342,7 @@ class SerialWorker(QObject):
             return
 
         # 成功完成
-        self.finished_signal.emit(True, f"固件发送完成，共 {num_chunks} 帧，结束命令已确认")
+        self.finished_signal.emit(True, f"固件发送完成，共 {num_chunks} 帧，结束命令已确认，固件CRC=0x{firmware_crc:08X}")
         self.firmware_send_finished.emit(True)
 
 
