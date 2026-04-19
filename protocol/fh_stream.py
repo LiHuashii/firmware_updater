@@ -28,9 +28,8 @@ class FhStreamProtocol:
     def pack(tag: int, value: bytes) -> bytes:
         """
         打包一帧数据
-        :param tag:   帧类型 (DATA/CMD/ACK)
-        :param value: 负载数据 (bytes)
-        :return:      完整帧数据
+        帧格式: | HEAD(0x55) | TAG(1) | LEN(1) | VALUE(n) | CRC(4) |
+        CRC使用小端序发送
         """
         length = len(value)
         if length > 255:
@@ -38,12 +37,6 @@ class FhStreamProtocol:
 
         # 计算CRC: 校验范围 = TAG + LEN + VALUE
         crc_data = bytes([tag, length]) + value
-        print("=" * 50)
-        print(f"CRC调试:")
-        print(f"  数据(hex): {crc_data.hex()}")
-        # print(f"  CRC数据总长度: {len(crc_data)} 字节")
-        print("=" * 50)
-        print()  # 空行
         crc = FhStreamProtocol.crc32_calc(crc_data)
 
         frame = bytearray()
@@ -51,8 +44,8 @@ class FhStreamProtocol:
         frame.append(tag)
         frame.append(length)
         frame.extend(value)
-        # 使用大端序（网络字节序），与大多数嵌入式系统一致
-        frame.extend(struct.pack('>I', crc))  # 改为大端序 '>I'
+        # 小端序：先发送低字节
+        frame.extend(struct.pack('<I', crc))
         return bytes(frame)
 
     @staticmethod
@@ -108,15 +101,12 @@ class FhStreamProtocol:
                 length = state_machine["length"]
                 value = bytes(state_machine["value"])
                 received_crc_bytes = bytes(state_machine["crc"])
-                # 使用大端序解析
-                received_crc = struct.unpack('>I', received_crc_bytes)[0]
+                # 修改：使用小端序解析 '<I'
+                received_crc = struct.unpack('<I', received_crc_bytes)[0]
 
                 # 计算期望的CRC（校验范围：TAG + LEN + VALUE）
                 crc_data = bytes([tag, length]) + value
                 expected_crc = FhStreamProtocol.crc32_calc(crc_data)
-
-                # 打印调试信息
-                # print(f"CRC调试: 数据={crc_data.hex()}, 期望={hex(expected_crc)}, 收到={hex(received_crc)}")
 
                 if received_crc != expected_crc:
                     event = "ERROR_CRC"

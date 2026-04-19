@@ -211,20 +211,45 @@ class MainWindow(QMainWindow):
             self.worker.log_signal.connect(self._log)
             self.worker.finished_signal.connect(self._on_upgrade_finished)
             self.worker.progress_signal.connect(self._update_progress)
+            # 连接串口打开结果信号
+            self.worker.serial_open_result_signal.connect(self._on_serial_open_result)
             self.serial_thread.start()
             # 等待线程初始化完成再发送打开信号
             QTimer.singleShot(50, lambda: self.worker.start_serial_signal.emit())
 
-            self.open_btn.setText("关闭串口")
-            self.start_btn.setEnabled(bool(self.firmware_data))
-            self._log(f"打开串口 {port}")
+            # 暂时禁用按钮，防止重复点击
+            self.open_btn.setEnabled(False)
+            self.open_btn.setText("正在打开...")
+            self._log(f"正在打开串口 {port}...")
         else:
             # 关闭串口
             if self.worker:
                 self.worker.stop_serial_signal.emit()
             # 等待串口完全关闭
             QTimer.singleShot(500, self._finalize_serial_close)
-    
+
+    def _on_serial_open_result(self, success: bool, message: str):
+        """串口打开结果回调"""
+        self.open_btn.setEnabled(True)
+        if success:
+            self.open_btn.setText("关闭串口")
+            self.start_btn.setEnabled(bool(self.firmware_data))
+            self._log(f"串口已打开: {message}")
+        else:
+            # 打开失败，清理线程
+            self.open_btn.setText("打开串口")
+            self.start_btn.setEnabled(False)
+            self._log(f"串口打开失败: {message}")
+            # 清理失败的串口线程
+            if self.serial_thread:
+                self.serial_thread.quit()
+                if not self.serial_thread.wait(2000):
+                    self.serial_thread.terminate()
+                    self.serial_thread.wait()
+                self.serial_thread.deleteLater()
+                self.serial_thread = None
+                self.worker = None
+
     def _finalize_serial_close(self):
         """延迟关闭线程，确保端口释放"""
         if self.serial_thread:

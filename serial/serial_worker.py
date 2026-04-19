@@ -12,6 +12,7 @@ class SerialWorker(QObject):
     firmware_send_finished = pyqtSignal(bool)
     start_serial_signal = pyqtSignal()
     stop_serial_signal = pyqtSignal()
+    serial_open_result_signal = pyqtSignal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -69,6 +70,7 @@ class SerialWorker(QObject):
             if self.serial.open(QSerialPort.ReadWrite):
                 self.serial.readyRead.connect(self._on_ready_read)
                 self.running = True
+                self.serial_open_result_signal.emit(True, f"{self.port_name} @ {self.baud_rate}")
                 self.log_signal.emit(f"串口已打开: {self.port_name} @ {self.baud_rate}")
                 return
             else:
@@ -77,8 +79,10 @@ class SerialWorker(QObject):
                 self.serial.deleteLater()
                 self.serial = None
                 if attempt < 3:
-                    time.sleep(0.5)  # 等待 500ms 后重试
+                    time.sleep(0.5)
 
+        # 所有尝试都失败
+        self.serial_open_result_signal.emit(False, f"{self.port_name}")
         self.finished_signal.emit(False, f"串口打开失败: {self.port_name}")
         self.log_signal.emit(f"最终打开失败: {self.port_name}")
 
