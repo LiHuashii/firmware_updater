@@ -7,6 +7,7 @@ from protocol.fh_stream import FhStreamProtocol
 
 class SerialWorker(QObject):
     log_signal = pyqtSignal(str)
+    rx_data_signal = pyqtSignal(bytes)  # 新增：原始RX数据信号
     progress_signal = pyqtSignal(int, int)
     finished_signal = pyqtSignal(bool, str)
     firmware_send_finished = pyqtSignal(bool)
@@ -134,8 +135,16 @@ class SerialWorker(QObject):
         if not self.running:
             return
         data = self.serial.readAll()
-        for i in range(data.size()):
-            byte_val = data[i]
+        # 将QByteArray转换为bytes
+        raw_data = bytes(data)
+        
+        # 发送原始数据到RX日志（右侧）
+        if raw_data:
+            self.rx_data_signal.emit(raw_data)
+        
+        # 解析协议帧
+        for i in range(len(raw_data)):
+            byte_val = raw_data[i]
             byte_int = byte_val[0] if isinstance(byte_val, bytes) else byte_val
             event, frame = FhStreamProtocol.unpack_byte(byte_int, self.rx_state_machine)
             if event == "FRAME_RECEIVED":
