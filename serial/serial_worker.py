@@ -31,6 +31,7 @@ class SerialWorker(QObject):
         self.ack_mutex = QMutex()
         self.ack_received = False
         self.received_ack_id = None
+        self.received_ack_value = None  # 新增：存储ACK的VALUE
 
         self.rx_state_machine = {
             "state": "IDLE",
@@ -153,16 +154,23 @@ class SerialWorker(QObject):
                 if tag == FhStreamProtocol.TAG_ACK:
                     try:
                         ack_id = int.from_bytes(value[:4], 'little')
+                        ack_value = int.from_bytes(value[:4], 'little')  # ACK的VALUE就是前4字节
+                        print(f"[RX] 收到ACK帧: tag=0x{tag:02X}, len={frame['length']}, value={value.hex().upper()}, ack_id={ack_id} (0x{ack_id:08X}), ack_value={ack_value}")
+                        
                         self.ack_mutex.lock()
                         self.ack_received = True
                         self.received_ack_id = ack_id
+                        self.received_ack_value = ack_value  # 存储ACK的VALUE
                         self.ack_mutex.unlock()
-                        self.log_signal.emit(f"收到ACK, ID={ack_id}")
+                        # self.log_signal.emit(f"收到ACK, ID={ack_id}, VALUE=0x{ack_value:08X}")
                     except Exception as e:
+                        print(f"[RX] ACK解析失败: {e}")
                         self.log_signal.emit(f"ACK解析失败: {e}")
                 else:
+                    print(f"[RX] 收到非ACK帧: tag=0x{tag:02X}, len={frame['length']}, value={value.hex().upper()}")
                     self.log_signal.emit(f"收到非ACK帧, tag=0x{tag:02X}")
             elif event == "ERROR_CRC":
+                print(f"[RX] CRC校验错误")
                 self.log_signal.emit("CRC校验错误(接收帧)")
 
     def _clear_read_buffer(self):
@@ -172,16 +180,24 @@ class SerialWorker(QObject):
             if discarded > 0:
                 self.log_signal.emit(f"清空了 {discarded} 字节残留数据")
 
-    def send_frame_and_wait_ack(self, frame: bytes, expected_id: int, timeout_ms: int = None) -> bool:
+    def send_frame_and_wait_ack(self, frame: bytes, expected_id: int, timeout_ms: int = None, return_value: bool = False):
+        """
+        发送帧并等待ACK
+        :param frame: 要发送的帧
+        :param expected_id: 期望的ACK ID，-1表示不校验ID
+        :param timeout_ms: 超时时间(ms)
+        :param return_value: 是否返回ACK的VALUE值
+        :return: 如果return_value=False，返回bool；如果return_value=True，返回(success, ack_value)
+        """
         if timeout_ms is None:
             timeout_ms = self.ack_timeout_ms
 
         if not self.serial or not self.serial.isOpen():
             self.log_signal.emit("串口未打开，无法发送")
-            return False
+            return (False, None) if return_value else False
 
         if self._is_stop_requested():
-            return False
+            return (False, None) if return_value else False
 
         self._clear_read_buffer()
         self.rx_state_machine = {
@@ -196,6 +212,7 @@ class SerialWorker(QObject):
         self.ack_mutex.lock()
         self.ack_received = False
         self.received_ack_id = None
+        self.received_ack_value = None
         self.ack_mutex.unlock()
 
         self.serial.write(frame)
@@ -226,27 +243,43 @@ class SerialWorker(QObject):
 
         if self._is_stop_requested():
             self.log_signal.emit("等待ACK因停止请求而中断")
-            return False
+            return (False, None) if return_value else False
 
         self.ack_mutex.lock()
         received = self.ack_received
         ack_id = self.received_ack_id
+        ack_value = self.received_ack_value
         self.ack_mutex.unlock()
 
         if received:
-            # 如果 expected_id == -1，不校验 ID，只要收到 ACK 就算成功
+            if return_value:
+                print(f"[ACK] 收到ACK, ID={ack_id}, VALUE={ack_value} (0x{ack_value:08X})")
+            
             if expected_id == -1:
-                self.log_signal.emit(f"成功收到ACK (不校验ID)")
-                return True
+                # 不校验ID
+                if return_value:
+                    self.log_signal.emit(f"成功收到ACK (不校验ID), STATE=0x{ack_value:08X}")
+                    return True, ack_value
+                else:
+                    self.log_signal.emit(f"成功收到ACK (不校验ID)")
+                    return True
             elif ack_id == expected_id:
-                self.log_signal.emit(f"成功收到匹配ACK (ID={expected_id})")
-                return True
+                if return_value:
+                    self.log_signal.emit(f"成功收到匹配ACK (ID={expected_id}), VALUE=0x{ack_value:08X}")
+                    return True, ack_value
+                else:
+                    self.log_signal.emit(f"成功收到匹配ACK (ID={expected_id})")
+                    return True
             else:
-                self.log_signal.emit(f"ID不匹配: 期望{expected_id}, 收到{ack_id}")
-                return False
+                if return_value:
+                    self.log_signal.emit(f"ID不匹配: 期望{expected_id}, 收到{ack_id}")
+                    return False, ack_value
+                else:
+                    self.log_signal.emit(f"ID不匹配: 期望{expected_id}, 收到{ack_id}")
+                    return False
         else:
             self.log_signal.emit(f"等待ACK超时 (ID={expected_id})")
-            return False
+            return (False, None) if return_value else False
 
     @pyqtSlot(bytes, int)
     def send_firmware(self, firmware_data: bytes, chunk_data_size: int = 251):
@@ -308,12 +341,8 @@ class SerialWorker(QObject):
         self.log_signal.emit("所有数据帧发送完成，发送结束命令（固件CRC-32）...")
         
         # 计算整个固件文件的CRC-32
-        # 校验范围: LEN(固定0x04) + bin文件内容
-        # 注意：LEN 固定为 0x04 表示后面跟4字节的CRC值，但这里我们需要计算的是固件内容的CRC
-        # 按照要求: 计算的数据为 LEN（固定为0x04）+ bin文件内容
         crc_data = firmware_data
         firmware_crc = FhStreamProtocol.crc32_calc(crc_data)
-        # print(f"crc_data 完整内容: {crc_data.hex().upper()}")
         
         # VALUE 为 4 字节的 CRC-32 值（小端序）
         cmd_value = firmware_crc.to_bytes(4, 'little')
@@ -321,8 +350,9 @@ class SerialWorker(QObject):
         
         self.log_signal.emit(f"固件CRC-32: 0x{firmware_crc:08X}")
 
-        # 等待 CMD 的 ACK
+        # 等待 CMD 的 ACK，并获取 ACK 的 VALUE
         cmd_ack_ok = False
+        cmd_ack_value = None
         for retry in range(self.max_retries):
             if self._is_stop_requested():
                 self.log_signal.emit("用户停止了升级")
@@ -331,19 +361,32 @@ class SerialWorker(QObject):
                 return
 
             self.log_signal.emit(f"发送结束命令 (CRC=0x{firmware_crc:08X}) 尝试 {retry+1}/{self.max_retries}")
-            if self.send_frame_and_wait_ack(cmd_frame, expected_id=-1):
-                cmd_ack_ok = True
-                break
+            
+            # 发送并等待ACK，同时获取ACK的VALUE
+            cmd_ack_ok, cmd_ack_value = self.send_frame_and_wait_ack(cmd_frame, expected_id=-1, return_value=True)
+            
+            if cmd_ack_ok:
+                # 检查ACK的VALUE值
+                if cmd_ack_value == 0:
+                    self.log_signal.emit(f"结束命令收到ACK，STATE=0x{cmd_ack_value:08X}，固件校验成功！")
+                    break
+                else:
+                    self.log_signal.emit(f"结束命令收到ACK，但STATE=0x{cmd_ack_value:08X} 固件CRC校验失败！")
+                    cmd_ack_ok = False
+                    break
             if retry < self.max_retries - 1:
                 time.sleep(0.001)
 
         if not cmd_ack_ok:
-            self.finished_signal.emit(False, "结束命令未收到 ACK")
+            if cmd_ack_value is not None and cmd_ack_value != 0:
+                self.finished_signal.emit(False, f"固件CRC校验失败，下位机返回错误码: 0x{cmd_ack_value:08X}")
+            else:
+                self.finished_signal.emit(False, "结束命令未收到 ACK")
             self.firmware_send_finished.emit(False)
             return
 
         # 成功完成
-        self.finished_signal.emit(True, f"固件发送完成，共 {num_chunks} 帧，结束命令已确认，固件CRC=0x{firmware_crc:08X}")
+        self.finished_signal.emit(True, f"固件升级成功！共 {num_chunks} 帧，固件CRC=0x{firmware_crc:08X}")
         self.firmware_send_finished.emit(True)
 
 
