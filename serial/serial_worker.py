@@ -311,8 +311,9 @@ class SerialWorker(QObject):
         # 校验范围: LEN(固定0x04) + bin文件内容
         # 注意：LEN 固定为 0x04 表示后面跟4字节的CRC值，但这里我们需要计算的是固件内容的CRC
         # 按照要求: 计算的数据为 LEN（固定为0x04）+ bin文件内容
-        crc_data = bytes([0x04]) + firmware_data
+        crc_data = firmware_data
         firmware_crc = FhStreamProtocol.crc32_calc(crc_data)
+        # print(f"crc_data 完整内容: {crc_data.hex().upper()}")
         
         # VALUE 为 4 字节的 CRC-32 值（小端序）
         cmd_value = firmware_crc.to_bytes(4, 'little')
