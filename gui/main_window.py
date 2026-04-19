@@ -32,7 +32,7 @@ def resource_path(relative_path):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FH_STREAM 固件升级工具 V1.0")
+        self.setWindowTitle("FH_STREAM 固件升级工具")
         self.setMinimumSize(1000, 700)
 
         # 设置窗口图标
@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         param_layout.addSpacing(20)
         param_layout.addWidget(QLabel("超时时间(ms):"))
         self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(100, 10000)
+        self.timeout_spin.setRange(10, 10000)
         self.timeout_spin.setValue(self.saved_timeout)
         self.timeout_spin.setSingleStep(100)
         self.timeout_spin.setToolTip("等待ACK的超时时间（毫秒）")
@@ -261,6 +261,8 @@ class MainWindow(QMainWindow):
         if not enabled:
             # 如果不启用时间戳，立即刷新当前缓冲区
             self._flush_rx_buffer()
+            # 将历史记录中的数据按分隔符拆分
+            self._split_history_data()
         else:
             # 重新启用时，重置缓冲区
             self._flush_rx_buffer()
@@ -272,6 +274,47 @@ class MainWindow(QMainWindow):
         
         # 刷新显示（时间戳状态改变，需要重新格式化显示）
         self._refresh_rx_display()
+
+    def _split_history_data(self):
+        """将历史记录中的数据按换行符或分隔符拆分成独立的记录"""
+        new_history = []
+        
+        for data, timestamp in self.rx_data_history:
+            if timestamp is None:
+                # 这是时间戳关闭时连续显示的数据，需要拆分
+                # 将 bytes 数据按换行符 \n 或 \r\n 拆分
+                lines = self._split_bytes_by_lines(data)
+                for line in lines:
+                    if line:
+                        new_history.append((line, None))
+            else:
+                # 有时间戳的数据直接保留
+                new_history.append((data, timestamp))
+        
+        self.rx_data_history = new_history
+
+    def _split_bytes_by_lines(self, data: bytes) -> list:
+        """将 bytes 数据按换行符拆分成多行"""
+        lines = []
+        start = 0
+        
+        for i in range(len(data)):
+            if data[i] == ord('\n'):
+                # 找到换行符，提取一行（包含换行符）
+                line = data[start:i+1]
+                lines.append(line)
+                start = i + 1
+            elif data[i] == ord('\r') and i + 1 < len(data) and data[i + 1] == ord('\n'):
+                # 处理 \r\n
+                line = data[start:i+2]
+                lines.append(line)
+                start = i + 2
+        
+        # 处理最后一行（如果没有换行符结尾）
+        if start < len(data):
+            lines.append(data[start:])
+        
+        return lines
 
     def _flush_rx_buffer(self):
         """刷新RX缓冲区，显示累积的数据"""
@@ -287,21 +330,20 @@ class MainWindow(QMainWindow):
         if not data:
             return
         
-        # 保存到历史记录
-        self.rx_data_history.append((data, timestamp))
-        
-        # 根据是否启用时间戳决定前缀
         if self.rx_timestamp_enable.isChecked() and timestamp:
+            # 有时间戳时，直接保存
+            self.rx_data_history.append((data, timestamp))
             ts_str = timestamp.toString("HH:mm:ss.zzz")
-            # 使用HTML格式设置时间戳为红色
             prefix = f'<span style="color: red;">[{ts_str}]</span> '
-            # 启用时间戳时，每条数据换行显示
             self.rx_text.append(f"{prefix}{self._format_rx_data_html(data)}")
         else:
-            # 不启用时间戳时，连续显示不换行
-            # 使用 insertPlainText 追加到当前行末尾
-            self.rx_text.moveCursor(QTextCursor.End)
-            self.rx_text.insertPlainText(self._format_rx_data(data))
+            # 没有时间戳时，按换行符拆分后再保存和显示
+            lines = self._split_bytes_by_lines(data)
+            for line in lines:
+                if line:
+                    self.rx_data_history.append((line, None))
+                    self.rx_text.moveCursor(QTextCursor.End)
+                    self.rx_text.insertPlainText(self._format_rx_data(line))
         
         # 自动滚动到底部
         self.rx_text.moveCursor(QTextCursor.End)
@@ -366,8 +408,6 @@ class MainWindow(QMainWindow):
 
     def _on_rx_data(self, data: bytes):
         """接收RX数据（右侧）"""
-        # hex_debug = ' '.join(f'{b:02X}' for b in data)
-        # self._log(f"RX原始数据: {hex_debug}")
         current_time = QDateTime.currentDateTime()
         
         if not self.rx_timestamp_enable.isChecked():
